@@ -947,7 +947,8 @@ async fn main()
     }
     else
     {
-        None
+        print!("No issue nor logs provided.\n");
+        return;
     };
 
     if results.is_some()
