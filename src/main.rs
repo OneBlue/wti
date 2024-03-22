@@ -975,7 +975,7 @@ async fn main()
 
             let default_message = io::read_to_string(io::stdin()).unwrap().trim().to_string();
 
-            if default_message.is_empty()
+            if !default_message.is_empty()
             {
                 add_message(default_message.as_str(), &HashMap::new(), &mut actions.user_messages);
             }
