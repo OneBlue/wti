@@ -972,7 +972,13 @@ async fn main()
         if args.comment.is_none() && args.default_message_stdin
         {
             print!("No conclusion found, reading default message from stdin...\n");
-            add_message(io::read_to_string(io::stdin()).unwrap().as_str(), &HashMap::new(), &mut actions.user_messages);
+
+            let default_message = io::read_to_string(io::stdin()).unwrap().trim().to_string();
+
+            if default_message.is_empty()
+            {
+                add_message(default_message.as_str(), &HashMap::new(), &mut actions.user_messages);
+            }
         }
     }
     
