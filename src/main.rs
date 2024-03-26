@@ -825,7 +825,10 @@ async fn update_issue(github: &mut octocrab::Octocrab, issue: u64, message: &Str
         github.issues("microsoft", "WSL").create_comment(issue, comment).await.expect("Failed to comment issue");
     }
 
-    github.issues("microsoft", "WSL").add_labels(issue, tags).await.expect("Failed to add tags");
+    if !tags.is_empty()
+    {
+        github.issues("microsoft", "WSL").add_labels(issue, tags).await.expect("Failed to add tags");
+    }
 }
 
 fn get_default_config_path() -> String
