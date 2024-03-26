@@ -599,6 +599,12 @@ fn process_wslconfig(content: String, actions: &mut GithubIssueActions)
                 Some(value) => process_memory_string(value.to_string(), actions),
                 None => ()
             }
+
+            match config.get_from(Some("wsl2"), "kernel") {
+                Some(value) => {add_message(&format!("\tCustom kernel found: '{value}'"), &HashMap::new(), &mut actions.debug_messages);}
+                None => ()
+            }
+
         }
 
         Err(err) => print!("{} {err}\n", "\tFailed to parse .wslconfig:".red())
@@ -726,7 +732,7 @@ fn evaluate_expression(result: &LogInformation, exp: &ConditionEval, matches: &m
     }
     else if exp.or.is_some()
     {
-        return exp.and.as_ref().unwrap().into_iter().any(|e| evaluate_condition(result, &e, matches))
+        return exp.or.as_ref().unwrap().into_iter().any(|e| evaluate_condition(result, &e, matches))
     }
     else if exp.not.is_some()
     {
