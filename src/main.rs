@@ -15,6 +15,7 @@ use directories::BaseDirs;
 struct LogInformation
 {
     appxversion: Option<String>,
+    parse_error: bool,
     evaluation_result: Vec<MatchResult>
 }
 
@@ -22,6 +23,7 @@ impl Default for LogInformation {
     fn default() -> LogInformation {
         LogInformation {
             appxversion: None,
+            parse_error: false,
             evaluation_result: Vec::new()
         }
     }
@@ -97,7 +99,7 @@ struct Rule
 {
     logline: Option<LoglineRule>,
     set: Option<SetRule>,
-    oneshot: Option<bool>
+    oneshot: Option<bool>,
 }
 
 #[derive(Deserialize, PartialEq, Debug)]
@@ -130,7 +132,8 @@ struct When
     condition: Condition,
     user_message: Option<String>,
     debug_message: Option<String>,
-    tag: Option<String>
+    tag: Option<String>,
+    skip_similar_issues: Option<bool>
 }
 
 #[derive(Deserialize, PartialEq, Debug)]
@@ -170,30 +173,18 @@ struct GithubIssueActions
 {
     user_messages: String,
     debug_messages: String,
-    tags: Vec<String>
+    tags: Vec<String>,
+    show_similar_issues: bool,
 }
 
-async fn get_logs_from_issue_description(issue:& Issue) -> Option<String>
+async fn get_logs_from_issue_description(issue:& Issue) -> Vec<String>
 {
     print!("Fetching logs for issue '{}'\n", issue.title);
 
-    let log_url = extract_log_url_from_body(issue.body.as_deref().unwrap_or(""));
-    if log_url.is_empty()
-    {
-        None
-    }
-    else if log_url.len() > 2
-    {
-        print!("Multiple log URLS found in issue body\n");
-        None
-    }
-    else {
-        print!("{}{}\n","Found logs in description: ".green(), log_url[0]);
-        Some(log_url[0].to_string())
-    }
+    return extract_log_url_from_body(issue.body.as_deref().unwrap_or(""));
 }
 
-async fn get_logs_from_issue_comments(issue: &Issue) -> Option<String>
+async fn get_logs_from_issue_comments(issue: &Issue) -> Vec<String>
 {
     let comments = octocrab::instance()
     .issues("microsoft", "WSL")
@@ -210,20 +201,20 @@ async fn get_logs_from_issue_comments(issue: &Issue) -> Option<String>
                 if !log_url.is_empty()
                 {
                     print!("Found logs from comment: {}\n", e.html_url);
-                    return Some(log_url[0].to_string())
+                    return log_url;
                 }
             }
         }
     }
 
     print!("{}", "No logs found in issue comments".red());
-    return None
+    return Vec::new();
 }
 
 
 fn extract_log_url_from_body(body: &str) -> Vec<String>
 {
-    let re = Regex::new(r"https?://[^\s^\)]+").unwrap();
+    let re = Regex::new(r"https?:\/\/[^\s^\)]+").unwrap();
 
     re.find_iter(&body).map(|e|e.as_str().to_string()).filter(|e|e.ends_with(".zip")).collect()
 }
@@ -293,7 +284,7 @@ fn process_logs(file: & mut File, config: &Config, extract_xls: Option<String>, 
         
             process_wslconfig(content, actions);
         }
-    }   
+    }
 
     {
         process_appxpackage( archive.by_name((root.to_owned() + sep + "appxpackage.txt").as_str()),  &mut log_info, actions);
@@ -304,14 +295,17 @@ fn process_logs(file: & mut File, config: &Config, extract_xls: Option<String>, 
         let tmp_dir = TempDir::new("wti-logs").unwrap();
         archive.extract(tmp_dir.path()).unwrap();
         
-        log_info.evaluation_result = process_etl(tmp_dir.path().join(root).join("logs.etl").as_path(), &config.rules, &config.wpa_profile, extract_xls);
+        let etl_result = process_etl(tmp_dir.path().join(root).join("logs.etl").as_path(), &config.rules, &config.wpa_profile, extract_xls);
+
+        log_info.parse_error = etl_result.is_none();
+        log_info.evaluation_result = etl_result.unwrap_or_default();
     }
 
     log_info
 }
 
 
-fn process_etl(etl: &Path, rules: &Vec<Rule>, wpa_profile: &String, extract_xls: Option<String>) -> Vec<MatchResult>
+fn process_etl(etl: &Path, rules: &Vec<Rule>, wpa_profile: &String, extract_xls: Option<String>) -> Option<Vec<MatchResult>>
 {
     let output_dir = TempDir::new("wti-logs-xls").unwrap();
     let output_path =   output_dir.path().to_str().unwrap();
@@ -319,19 +313,22 @@ fn process_etl(etl: &Path, rules: &Vec<Rule>, wpa_profile: &String, extract_xls:
     let etl_path = etl.to_str().unwrap();
     print!("Extracting logs from: {}\n", etl_path);
 
-    let result = Command::new("C:\\Program Files (x86)\\Windows Kits\\10\\Windows Performance Toolkit\\wpaexporter.exe").args(
-        ["-i",
-        etl_path,
-        "-profile",
-        wpa_profile.as_str(),
-        "-outputfolder",
-        output_path,
-      ]).output().expect("Failed to spwn wpa");
+    // -tle is required to process .etl when events are lost
+    let args = vec!["-tle",
+    "-tti",
+     "-i",
+    etl_path,
+    "-profile",
+    wpa_profile.as_str(),
+    "-outputfolder",
+    output_path];
+
+    let result = Command::new("C:\\Program Files (x86)\\Windows Kits\\10\\Windows Performance Toolkit\\wpaexporter.exe").args(args.as_slice()).output().expect("Failed to spwn wpa");
 
     if !result.status.success()
     {
-        print!("wpaexporter failed. stdout: {}\n", String::from_utf8_lossy(&result.stderr));
-        return Vec::new();
+        print!("wpaexporter failed. Args: {} stdout: {}, stderr: {}\n", args.join(" "), String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+        return None
     }
 
 
@@ -339,12 +336,12 @@ fn process_etl(etl: &Path, rules: &Vec<Rule>, wpa_profile: &String, extract_xls:
     if files.is_empty()
     {
         print!("{} {}", "No xls files found in directory: \n".red(), output_path);
-        return Vec::new();
+        return None
     }
     else if files.len() > 1
     {
         print!("{} {}, {}", "More than 1 xls files found in directory: \n".red(), output_path, files.join(","));
-        return Vec::new();
+        return None
     }
 
     let xls_path = output_path.to_owned() + "\\" + files.first().unwrap();
@@ -359,7 +356,7 @@ fn process_etl(etl: &Path, rules: &Vec<Rule>, wpa_profile: &String, extract_xls:
         fs::copy(&xls_path, target).expect("Failed to copy xls");
     }
 
-    return read_logs_xls(&xls_path, rules);
+    return Some(read_logs_xls(&xls_path, rules));
 }
 
 fn rule_match(value: &str, match_rule: &Match) -> bool
@@ -684,7 +681,10 @@ struct Args {
     default_message_stdin: bool,
 
     #[clap(long)]
-    config: Option<String>
+    config: Option<String>,
+
+    #[clap(long)]
+    comments: bool
 }
 
 fn add_message(message: &str, fields: &HashMap<String, String>, target: &mut String)
@@ -788,6 +788,11 @@ fn evaluate_when(result: &LogInformation, when: &When, output: &mut GithubIssueA
             add_message(&when.debug_message.as_ref().unwrap(), &fields, &mut output.debug_messages);
         }
 
+        if when.skip_similar_issues.unwrap_or(false)
+        {
+            output.show_similar_issues = false;
+        }
+
         if when.tag.is_some() && !output.tags.contains(when.tag.as_ref().unwrap())
         {
             output.tags.push(when.tag.as_ref().unwrap().to_string());
@@ -797,6 +802,12 @@ fn evaluate_when(result: &LogInformation, when: &When, output: &mut GithubIssueA
 
 fn apply_actions(results: &LogInformation, actions: &Vec<Action>, output: &mut GithubIssueActions)
 {
+    if results.parse_error
+    {
+        add_message("Error while parsing the logs. See action page for details", &HashMap::new(), &mut output.debug_messages);
+        return;
+    }
+
     for action in actions
     {
         if action.foreach.is_some()
@@ -871,7 +882,7 @@ async fn main()
 
     let config = Config::deserialize(reader).unwrap();
 
-    let mut actions= GithubIssueActions{tags: Vec::new(), user_messages: String::new(), debug_messages: String::new()};
+    let mut actions= GithubIssueActions{tags: Vec::new(), user_messages: String::new(), debug_messages: String::new(), show_similar_issues: true};
 
     let results: Option<LogInformation> = if args.issue.is_some()
     {
@@ -885,8 +896,7 @@ async fn main()
         }
         else
         {
-
-            let mut log_url :Option<String> = None;
+            let mut log_urls: Vec<String>;
             
             if args.comment.is_some()
             {
@@ -899,52 +909,47 @@ async fn main()
 
                 process_tags(&comment.body.as_ref().unwrap_or(&"".to_owned()), &config.tags_rules, &mut actions);
 
-                let matches = extract_log_url_from_body(&comment.body.unwrap_or_default());
-
-                if matches.len() == 1
-                {
-                    log_url = Some(matches[0].to_string());
-                    print!("Found logs from comment {}: {}\n", comment.id, log_url.as_deref().unwrap());
-                }
-                else if matches.len() > 1
-                {
-                    print!("Multiple log URL's found in comment {}: {}\n", comment.id, matches.as_slice().join(","));
-                }
+                log_urls = extract_log_url_from_body(&comment.body.unwrap_or_default());
             }
             else
             {
                 process_tags(&issue.body.as_ref().unwrap_or(&"".to_owned()), &config.tags_rules, &mut actions);
 
-                log_url = get_logs_from_issue_description(&issue).await;
+                log_urls = get_logs_from_issue_description(&issue).await;
 
-                if !log_url.is_some()
+                if log_urls.is_empty() && args.comments
                 {
                     print!("No logs found from description. Looking at comments\n");
-                    log_url = get_logs_from_issue_comments(&issue).await;
+                    log_urls = get_logs_from_issue_comments(&issue).await;
                 }
             }
 
-            if log_url.is_some()
+            if log_urls.len() == 1
             {
-                let mut logs = download_logs(&log_url.unwrap()).await;
+                let mut logs = download_logs(&log_urls[0]).await;
                 Some(process_logs(&mut logs, &config, args.export_xls, &mut actions))
             }
-            else if args.comment.is_none()
+            else if log_urls.is_empty()  
             {
-                print!("{}\n", "No logs found in issue, adding missing logs message and tags".yellow());
-
-                for e in config.logs_rules.missing_logs_add_tags
+                if args.comment.is_none()
                 {
-                    actions.tags.push(e);
-                }
+                    print!("{}\n", "No logs found in issue, adding missing logs message and tags".yellow());
 
-                add_message(&config.logs_rules.missing_logs_message, &HashMap::new(), &mut actions.user_messages);
+                    for e in config.logs_rules.missing_logs_add_tags
+                    {
+                        actions.tags.push(e);
+                    }
+
+                    add_message(&config.logs_rules.missing_logs_message, &HashMap::new(), &mut actions.user_messages);
+                }
 
                 None
             }
             else
             {
-                print!("{}\n", "No logs found in comment".yellow());
+                add_message("Multiple log files found", &HashMap::new(), &mut actions.debug_messages);
+
+                print!("Found multiple log urls: {}\n", log_urls.join(","));
                 None
             }
         }
@@ -952,7 +957,7 @@ async fn main()
     else if args.input_xls.is_some()
     {
         let results: Vec<MatchResult> = read_logs_xls(&args.input_xls.unwrap(), &config.rules);
-        Some(LogInformation{appxversion: None, evaluation_result: results})
+        Some(LogInformation{appxversion: None, evaluation_result: results, parse_error: false})
     }
     else
     {
@@ -974,23 +979,21 @@ async fn main()
 
         apply_actions(results.as_ref().unwrap(), &config.actions, &mut actions);
     }
-    else
+
+    // Add the 'similar issues' message if this we're not invoked on a specific comment AND no logs were found
+
+    if actions.show_similar_issues && args.default_message_stdin
     {
-        // Add the 'similar issues' message if this we're not invoked on a specific comment AND no logs were found
+        print!("No conclusion found, reading default message from stdin...\n");
 
-        if args.comment.is_none() && args.default_message_stdin
+        let default_message = io::read_to_string(io::stdin()).unwrap().trim().to_string();
+
+        if !default_message.is_empty()
         {
-            print!("No conclusion found, reading default message from stdin...\n");
-
-            let default_message = io::read_to_string(io::stdin()).unwrap().trim().to_string();
-
-            if !default_message.is_empty()
-            {
-                add_message(default_message.as_str(), &HashMap::new(), &mut actions.user_messages);
-            }
+            add_message(default_message.as_str(), &HashMap::new(), &mut actions.user_messages);
         }
     }
-    
+
     print!("{}", "\nLog evaluation results: \n".green().bold());
     if !actions.tags.is_empty()
     {
