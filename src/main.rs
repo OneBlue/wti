@@ -4,7 +4,7 @@ use octocrab::models::issues::Issue;
 use regex::Regex;
 use colored::Colorize;
 use ini::Ini;
-use zip::result::ZipError;
+use zip::{read::ZipFile, result::ZipError};
 use utf16string::WString;
 use tempdir::TempDir;
 use serde::Deserialize;
@@ -61,6 +61,9 @@ struct CaptureList
     field5: Option<String>,
     field6: Option<String>,
     field7: Option<String>,
+    field8: Option<String>,
+    field9: Option<String>,
+    field10: Option<String>,
 }
 
 #[derive(Deserialize, PartialEq, Debug)]
@@ -91,6 +94,9 @@ struct LoglineRule
     field5: Option<RuleString>,
     field6: Option<RuleString>,
     field7: Option<RuleString>,
+    field8: Option<RuleString>,
+    field9: Option<RuleString>,
+    field10: Option<RuleString>,
 }
 
 
@@ -159,13 +165,21 @@ struct TagRule
 }
 
 #[derive(Deserialize, PartialEq, Debug)]
+struct OptionalComponentRule
+{
+    name: String,
+    set: String
+}
+
+#[derive(Deserialize, PartialEq, Debug)]
 struct Config
 {
     rules: Vec<Rule>,
     actions: Vec<Action>,
     wpa_profile: String,
     logs_rules: LogsRules,
-    tags_rules: Vec<TagRule>
+    tags_rules: Vec<TagRule>,
+    optional_component_rules: Vec<OptionalComponentRule>
 }
 
 #[derive(Debug)]
@@ -291,6 +305,10 @@ fn process_logs(file: & mut File, config: &Config, extract_xls: Option<String>, 
     }
 
     {
+        process_optional_components(archive.by_name((root.to_owned() + sep + "optional-components.txt").as_str()), &mut log_info, actions, &config.optional_component_rules)
+    }
+
+    {
 
         let tmp_dir = TempDir::new("wti-logs").unwrap();
         archive.extract(tmp_dir.path()).unwrap();
@@ -298,7 +316,7 @@ fn process_logs(file: & mut File, config: &Config, extract_xls: Option<String>, 
         let etl_result = process_etl(tmp_dir.path().join(root).join("logs.etl").as_path(), &config.rules, &config.wpa_profile, extract_xls);
 
         log_info.parse_error = etl_result.is_none();
-        log_info.evaluation_result = etl_result.unwrap_or_default();
+        log_info.evaluation_result.append(&mut etl_result.unwrap_or_default());
     }
 
     log_info
@@ -420,6 +438,18 @@ fn evaluate_capture(captures: &CaptureList, fields: &HashMap<String, String>) ->
     {
         result.insert(captures.field7.as_ref().unwrap().to_string(), fields["Field 7"].to_string());
     }
+    if captures.field8.is_some() && fields.contains_key("Field 8")
+    {
+        result.insert(captures.field8.as_ref().unwrap().to_string(), fields["Field 8"].to_string());
+    }
+    if captures.field9.is_some() && fields.contains_key("Field 9")
+    {
+        result.insert(captures.field9.as_ref().unwrap().to_string(), fields["Field 9"].to_string());
+    }
+    if captures.field10.is_some() && fields.contains_key("Field 10")
+    {
+        result.insert(captures.field10.as_ref().unwrap().to_string(), fields["Field 10"].to_string());
+    }
 
     return result;
 }
@@ -487,6 +517,21 @@ fn evaluate_rule(rule: &Rule, fields: &HashMap<String, String>) -> Option<MatchR
         return None;
     }
 
+    if filters.field8.is_some() && !string_match(fields.get("Field 8"), &filters.field8.as_ref().unwrap())
+    {
+        return None;
+    }
+
+    if filters.field9.is_some() && !string_match(fields.get("Field 9"), &filters.field9.as_ref().unwrap())
+    {
+        return None;
+    }
+
+    if filters.field10.is_some() && !string_match(fields.get("Field 10"), &filters.field10.as_ref().unwrap())
+    {
+        return None;
+    }
+
     if rule.set.is_some()
     {
         return Some(evaluate_set_capture(rule.set.as_ref().unwrap(), fields));
@@ -526,7 +571,7 @@ fn read_logs_xls(path: &str, rules: &Vec<Rule>) -> Vec<MatchResult>
     let mut file = csv::ReaderBuilder::new().from_path(path).unwrap();
     let headers = file.headers().unwrap().iter().map(|e|e.to_string()).collect::<Vec<String>>();
 
-    let fields_of_interest = vec!["Provider Name", "Task Name", "Field 1", "Field 2", "Field 3", "Field 4", "Field 5", "Field 6", "Field 7"];
+    let fields_of_interest = vec!["Provider Name", "Task Name", "Field 1", "Field 2", "Field 3", "Field 4", "Field 5", "Field 6", "Field 7", "Field 8", "Field 9", "Field 10"];
 
     let indexes = fields_of_interest.iter().map(|field| (field, headers.iter().position(|e|e == field))).collect::<HashMap<_, _>>();
     
@@ -608,6 +653,16 @@ fn process_wslconfig(content: String, actions: &mut GithubIssueActions)
     }
 }
 
+fn decode_powershell_output(file: ZipFile) -> String
+{
+    let input: Vec<u8> = file.bytes().map(|e|e.unwrap()).collect();
+    return match WString::from_utf16le(input.clone()).and_then(|e| Ok(e.to_utf8()))
+    {
+        Ok(str) => str,
+        Err(_) => std::str::from_utf8(input.as_slice()).unwrap().to_string()
+    };
+}
+
 fn process_appxpackage(file: Result<zip::read::ZipFile, ZipError>, result: &mut LogInformation, actions: &mut GithubIssueActions)
 {
     if file.is_err()
@@ -616,13 +671,7 @@ fn process_appxpackage(file: Result<zip::read::ZipFile, ZipError>, result: &mut 
         return;
     }
 
-    let bytes: Vec<u8> = file.unwrap().bytes().map(|e|e.unwrap()).collect();
-
-    let mut content =  match WString::from_utf16le(bytes.clone()).and_then(|e| Ok(e.to_utf8()))
-    {
-        Ok(str) => str,
-        Err(_) => std::str::from_utf8(bytes.as_slice()).unwrap().to_string()
-    };
+    let mut content =  decode_powershell_output(file.unwrap());
 
     if !content.contains("MicrosoftCorporationII.WindowsSubsystemForLinux")
     {
@@ -649,6 +698,62 @@ fn process_appxpackage(file: Result<zip::read::ZipFile, ZipError>, result: &mut 
     result.appxversion = Some(version_split[1].trim().to_string());
 
     add_message(("Detected appx version: ".to_owned() +  result.appxversion.as_ref().unwrap()).as_str(), &HashMap::new(), &mut actions.debug_messages);
+}
+
+fn process_optional_components(file: Result<zip::read::ZipFile, ZipError>, result: &mut LogInformation, actions: &mut GithubIssueActions, rules: &Vec<OptionalComponentRule>)
+{
+    if file.is_err()
+    {
+        add_message("optional-components.txt not found", &HashMap::new(), &mut actions.debug_messages);
+        return;
+    }
+
+    let content = decode_powershell_output(file.unwrap()).replace("\r", "");
+
+    let mut name: Option<String> = None;
+
+    for e in content.split("\n")
+    {
+        if ! e.contains(":")
+        {
+            continue;
+        }
+
+        let parts: Vec<&str> = e.split(":").collect();
+        if parts.len() != 2
+        {
+            add_message(("Unexpected format in optional-component.txt: ".to_owned() + e).as_str(), &HashMap::new(), &mut actions.debug_messages);
+            return;
+        }
+
+        let field = parts[0].trim().to_lowercase();
+
+        if field == "featurename"
+        {
+            name = Some(parts[1].trim().to_lowercase().to_string());
+        }
+        else if field == "state"
+        {
+            let state = parts[1].trim().to_lowercase();
+
+            print!("Feature: {}: {}\n", name.as_deref().unwrap_or_default(), state);
+
+            if state == "enabled"
+            {
+                let rule = rules.iter().find(|r|r.name.to_lowercase() == name.as_ref().unwrap_or(&"".to_string()).to_string());
+                if rule.is_some()
+                {
+                    result.evaluation_result.push(MatchResult{name: rule.as_ref().unwrap().set.to_string(), captures: HashMap::new()});
+                }
+            }
+            else if state != "disabled"
+            {
+                add_message(("Unexpected format in optional-component.txt: ".to_owned() + e).as_str(), &HashMap::new(), &mut actions.debug_messages);
+                return;
+            }
+        }
+    }
+
 }
 
 
