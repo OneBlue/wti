@@ -309,7 +309,6 @@ fn process_logs(file: & mut File, config: &Config, extract_xls: Option<String>, 
     }
 
     {
-
         let tmp_dir = TempDir::new("wti-logs").unwrap();
         archive.extract(tmp_dir.path()).unwrap();
         
@@ -746,7 +745,7 @@ fn process_optional_components(file: Result<zip::read::ZipFile, ZipError>, resul
                     result.evaluation_result.push(MatchResult{name: rule.as_ref().unwrap().set.to_string(), captures: HashMap::new()});
                 }
             }
-            else if state != "disabled"
+            else if state != "disabled" && state != "disabledwithpayloadremoved"
             {
                 add_message(("Unexpected format in optional-component.txt: ".to_owned() + e).as_str(), &HashMap::new(), &mut actions.debug_messages);
                 return;
