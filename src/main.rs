@@ -953,9 +953,12 @@ fn get_default_config_path() -> String
 
 fn process_tags(text:& String, rules: &Vec<TagRule>, actions: &mut GithubIssueActions)
 {
+    // users will sometimes reply to bot messages. Skip quotation blocks when looking for tag strings
+    let cleaned_text = text.split("\n").collect::<Vec<&str>>().iter().filter(|e|!e.trim().starts_with('>')).map(|e|e.to_string()).collect::<Vec<String>>().as_slice().join("\n");
+
     for e in rules
     {
-        if text.contains(&e.contains)
+        if cleaned_text.contains(&e.contains)
         {
             actions.tags.push(e.tag.to_string());
 
