@@ -10,6 +10,8 @@ use tempdir::TempDir;
 use serde::Deserialize;
 use clap::Parser;
 use directories::BaseDirs;
+use itertools::Itertools;
+
 
 
 struct LogInformation
@@ -158,6 +160,13 @@ struct LogsRules
 }
 
 #[derive(Deserialize, PartialEq, Debug)]
+struct TagsRules
+{
+    tags: Vec<TagRule>,
+    ignore: Vec<String>
+}
+
+#[derive(Deserialize, PartialEq, Debug)]
 struct TagRule
 {
     contains: String,
@@ -178,7 +187,7 @@ struct Config
     actions: Vec<Action>,
     wpa_profile: String,
     logs_rules: LogsRules,
-    tags_rules: Vec<TagRule>,
+    tags_rules: TagsRules,
     optional_component_rules: Vec<OptionalComponentRule>
 }
 
@@ -257,6 +266,40 @@ async fn download_logs(url: &String) -> File
     }
 }
 
+fn decode_powershell_output(file: ZipFile) -> String
+{
+    let mut input: Vec<u8> = file.bytes().map(|e|e.unwrap()).collect();
+
+    let mut mabye_utf16le = false;
+    
+    // Look for a BOM header
+    if input.len() >= 2 && input[0] == 255 && input[1] == 254
+    {
+        mabye_utf16le = true;
+        input = input.iter().skip(2).copied().collect();
+    }
+
+    // If the second byte is zero, this is most likely utf16 le
+
+    if input.len() >= 2 && input[1] == 0
+    {
+        mabye_utf16le = true;
+    }
+
+    return if mabye_utf16le
+    {
+        match WString::from_utf16le(input.clone()).and_then(|e| Ok(e.to_utf8()))
+        {
+            Ok(str) => str,
+            Err(_) => std::str::from_utf8(input.as_slice()).unwrap().to_string()
+        }
+    }
+    else
+    {
+        std::str::from_utf8(input.as_slice()).unwrap().to_string()
+    }
+}
+
 fn process_logs(file: & mut File, config: &Config, extract_xls: Option<String>, actions: &mut GithubIssueActions) -> LogInformation
 {
     let mut log_info = LogInformation::default();
@@ -293,8 +336,7 @@ fn process_logs(file: & mut File, config: &Config, extract_xls: Option<String>, 
         {
             add_message(".wslconfig found", &HashMap::new(), &mut actions.debug_messages);
 
-            let mut content = String::new();
-            wslconfig.unwrap().read_to_string(&mut content).unwrap();
+            let content = decode_powershell_output(wslconfig.unwrap());
         
             process_wslconfig(content, actions);
         }
@@ -648,18 +690,8 @@ fn process_wslconfig(content: String, actions: &mut GithubIssueActions)
 
         }
 
-        Err(err) => print!("{} {err}\n", "\tFailed to parse .wslconfig:".red())
+        Err(err) => add_message(("Failed to parse .wslconfig: ".to_owned() + &err.msg + &content).as_str(), &mut HashMap::new(), &mut actions.debug_messages)
     }
-}
-
-fn decode_powershell_output(file: ZipFile) -> String
-{
-    let input: Vec<u8> = file.bytes().map(|e|e.unwrap()).collect();
-    return match WString::from_utf16le(input.clone()).and_then(|e| Ok(e.to_utf8()))
-    {
-        Ok(str) => str,
-        Err(_) => std::str::from_utf8(input.as_slice()).unwrap().to_string()
-    };
 }
 
 fn process_appxpackage(file: Result<zip::read::ZipFile, ZipError>, result: &mut LogInformation, actions: &mut GithubIssueActions)
@@ -734,8 +766,6 @@ fn process_optional_components(file: Result<zip::read::ZipFile, ZipError>, resul
         else if field == "state"
         {
             let state = parts[1].trim().to_lowercase();
-
-            print!("Feature: {}: {}\n", name.as_deref().unwrap_or_default(), state);
 
             if state == "enabled"
             {
@@ -951,12 +981,18 @@ fn get_default_config_path() -> String
     return BaseDirs::new().unwrap().config_dir().to_str().unwrap().to_string() + "\\wti\\config.yml";
 }
 
-fn process_tags(text:& String, rules: &Vec<TagRule>, actions: &mut GithubIssueActions)
+fn process_tags(text:& String, rules: &TagsRules, actions: &mut GithubIssueActions)
 {
     // users will sometimes reply to bot messages. Skip quotation blocks when looking for tag strings
-    let cleaned_text = text.split("\n").collect::<Vec<&str>>().iter().filter(|e|!e.trim().starts_with('>')).map(|e|e.to_string()).collect::<Vec<String>>().as_slice().join("\n");
+    let mut cleaned_text = text.split("\n").collect::<Vec<&str>>().iter().filter(|e|!e.trim().starts_with('>')).map(|e|e.to_lowercase().to_string()).collect::<Vec<String>>().as_slice().join("\n");
 
-    for e in rules
+    // Remove all the 'ignored' strings from the message
+    for e in &rules.ignore
+    {
+        cleaned_text = cleaned_text.replace(e, "");
+    }
+
+    for e in &rules.tags
     {
         if cleaned_text.contains(&e.contains)
         {
@@ -1030,6 +1066,8 @@ async fn main()
                     log_urls = get_logs_from_issue_comments(&issue).await;
                 }
             }
+
+            log_urls = log_urls.into_iter().unique().collect();
 
             if log_urls.len() == 1
             {
