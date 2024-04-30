@@ -818,7 +818,10 @@ struct Args {
     config: Option<String>,
 
     #[clap(long)]
-    comments: bool
+    comments: bool,
+
+    #[clap(long)]
+    previous_issue_body: Option<String>
 }
 
 fn add_message(message: &str, fields: &HashMap<String, String>, target: &mut String)
@@ -1017,6 +1020,19 @@ async fn main()
         octocrab::OctocrabBuilder::new().build().unwrap()
     };
 
+    let mut previous_issue_body: Option<String> = None;
+
+    if args.previous_issue_body.is_some()
+    {
+        if args.comment.is_some()
+        {
+            panic!("Can't pass --comment and --previous-issue-body at the same time.");
+        }
+
+        previous_issue_body = Some(fs::read_to_string(args.previous_issue_body.unwrap()).unwrap());
+    }
+
+
     let config_path = args.config.unwrap_or_else(||get_default_config_path());
     print!("Reading config from: {config_path}\n");
 
@@ -1069,12 +1085,37 @@ async fn main()
 
             log_urls = log_urls.into_iter().unique().collect();
 
-            if log_urls.len() == 1
+            if !log_urls.is_empty()
             {
+
+                if previous_issue_body.is_some()
+                {
+                    // This blocks handles the case where an issue is edited to add logs after it was published.
+                    // In this case, we should only continue if the previous issue body didn't have log URL's
+
+                    let previous_body_logs_urls = extract_log_url_from_body(&previous_issue_body.unwrap());
+
+                    log_urls = log_urls.iter().filter(|e|!previous_body_logs_urls.contains(e)).cloned().collect::<Vec<String>>();
+                    if !log_urls.is_empty()
+                    {
+                        add_message(&("Issue was edited and new log file was found: ".to_owned() + &log_urls[0]), &HashMap::new(), &mut actions.debug_messages);
+                    }
+                    else
+                    {
+                        print!("Issue already had log URLs before edit. Skipping");
+                        return;
+                    }
+                }
+
+                if log_urls.len() > 1
+                {
+                    add_message(&("Multiple log files found, using: ".to_owned() + &log_urls[0]).to_owned(), &HashMap::new(), &mut actions.debug_messages);
+                }
+    
                 let mut logs = download_logs(&log_urls[0]).await;
                 Some(process_logs(&mut logs, &config, args.export_xls, &mut actions))
             }
-            else if log_urls.is_empty()  
+            else
             {
                 if args.comment.is_none()
                 {
@@ -1088,13 +1129,6 @@ async fn main()
                     add_message(&config.logs_rules.missing_logs_message, &HashMap::new(), &mut actions.user_messages);
                 }
 
-                None
-            }
-            else
-            {
-                add_message("Multiple log files found", &HashMap::new(), &mut actions.debug_messages);
-
-                print!("Found multiple log urls: {}\n", log_urls.join(","));
                 None
             }
         }
