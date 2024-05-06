@@ -1117,7 +1117,7 @@ async fn main()
             }
             else
             {
-                if args.comment.is_none()
+                if args.comment.is_none() && previous_issue_body.is_none()
                 {
                     print!("{}\n", "No logs found in issue, adding missing logs message and tags".yellow());
 
