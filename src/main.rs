@@ -1087,13 +1087,12 @@ async fn main()
 
             if !log_urls.is_empty()
             {
-
                 if previous_issue_body.is_some()
                 {
                     // This blocks handles the case where an issue is edited to add logs after it was published.
                     // In this case, we should only continue if the previous issue body didn't have log URL's
 
-                    let previous_body_logs_urls = extract_log_url_from_body(&previous_issue_body.unwrap());
+                    let previous_body_logs_urls = extract_log_url_from_body(&previous_issue_body.as_ref().unwrap());
 
                     log_urls = log_urls.iter().filter(|e|!previous_body_logs_urls.contains(e)).cloned().collect::<Vec<String>>();
                     if !log_urls.is_empty()
@@ -1161,7 +1160,7 @@ async fn main()
 
     // Add the 'similar issues' message if this we're not invoked on a specific comment AND no logs were found
 
-    if actions.show_similar_issues && args.default_message_stdin
+    if actions.show_similar_issues && args.default_message_stdin && previous_issue_body.is_none()
     {
         print!("No conclusion found, reading default message from stdin...\n");
 
