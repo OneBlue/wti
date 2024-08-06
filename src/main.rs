@@ -35,10 +35,11 @@ impl Default for LogInformation {
 struct Match
 {
     contains: Option<String>,
-    regex: Option<String>
+    regex: Option<String>,
+    not: Option<Box<RuleString>>
 }
 
-#[derive(Clone)]
+#[derive(Clone,)]
 struct MatchResult
 {
     name: String,
@@ -66,6 +67,7 @@ struct CaptureList
     field8: Option<String>,
     field9: Option<String>,
     field10: Option<String>,
+    event: Option<String>
 }
 
 #[derive(Deserialize, PartialEq, Debug)]
@@ -89,6 +91,7 @@ struct LoglineRule
 {
     provider: Option<RuleString>,
     task: Option<RuleString>,
+    event: Option<RuleString>,
     field1: Option<RuleString>,
     field2: Option<RuleString>,
     field3: Option<RuleString>,
@@ -429,6 +432,10 @@ fn rule_match(value: &str, match_rule: &Match) -> bool
         // TODO: This is very slow
         return Regex::new(match_rule.regex.as_ref().unwrap()).unwrap().is_match(value)
     }
+    else if match_rule.not.is_some()
+    {
+        return !string_match(Some(&value.to_string()), match_rule.not.as_ref().unwrap())
+    }
 
     print!("Found invalid match rule: {:?}", match_rule);
     panic!("invalid match rule");
@@ -492,6 +499,11 @@ fn evaluate_capture(captures: &CaptureList, fields: &HashMap<String, String>) ->
         result.insert(captures.field10.as_ref().unwrap().to_string(), fields["Field 10"].to_string());
     }
 
+    if captures.event.is_some() && fields.contains_key("Event Name")
+    {
+        result.insert(captures.event.as_ref().unwrap().to_string(), fields["Event Name"].to_string());
+    }
+
     return result;
 }
 
@@ -517,6 +529,10 @@ fn evaluate_rule(rule: &Rule, fields: &HashMap<String, String>) -> Option<MatchR
         return None;
     }
 
+    if filters.event.is_some() && !string_match(fields.get("Event Name"), &filters.event.as_ref().unwrap())
+    {
+        return None;
+    }
 
     if filters.task.is_some() && !string_match(fields.get("Task Name"), &filters.task.as_ref().unwrap())
     {
@@ -612,7 +628,7 @@ fn read_logs_xls(path: &str, rules: &Vec<Rule>) -> Vec<MatchResult>
     let mut file = csv::ReaderBuilder::new().from_path(path).unwrap();
     let headers = file.headers().unwrap().iter().map(|e|e.to_string()).collect::<Vec<String>>();
 
-    let fields_of_interest = vec!["Provider Name", "Task Name", "Field 1", "Field 2", "Field 3", "Field 4", "Field 5", "Field 6", "Field 7", "Field 8", "Field 9", "Field 10"];
+    let fields_of_interest = vec!["Provider Name", "Task Name", "Event Name", "Field 1", "Field 2", "Field 3", "Field 4", "Field 5", "Field 6", "Field 7", "Field 8", "Field 9", "Field 10"];
 
     let indexes = fields_of_interest.iter().map(|field| (field, headers.iter().position(|e|e == field))).collect::<HashMap<_, _>>();
     
