@@ -158,6 +158,7 @@ struct Action
 struct LogsRules
 {
     missing_logs_message: String,
+    missing_logs_etl_message: String,
     skip_tags: Vec<String>,
     missing_logs_add_tags: Vec<String>,
 }
@@ -357,10 +358,26 @@ fn process_logs(file: & mut File, config: &Config, extract_xls: Option<String>, 
         let tmp_dir = TempDir::new("wti-logs").unwrap();
         archive.extract(tmp_dir.path()).unwrap();
         
-        let etl_result = process_etl(tmp_dir.path().join(root).join("logs.etl").as_path(), &config.rules, &config.wpa_profile, extract_xls);
+        let etl_path = tmp_dir.path().join(root).join("logs.etl");
+        if !etl_path.exists()
+        {
+            add_message("No logs.etl found in archive.", &HashMap::new(), &mut actions.debug_messages);
+            add_message(&config.logs_rules.missing_logs_etl_message, &HashMap::new(), &mut actions.user_messages);
 
-        log_info.parse_error = etl_result.is_none();
-        log_info.evaluation_result.append(&mut etl_result.unwrap_or_default());
+            for e in config.logs_rules.missing_logs_add_tags.as_slice()
+            {
+                actions.tags.push(e.to_string());
+            }
+
+            log_info.parse_error = true;
+        }
+        else 
+        {
+            let etl_result = process_etl(&etl_path, &config.rules, &config.wpa_profile, extract_xls);
+
+            log_info.parse_error = etl_result.is_none();
+            log_info.evaluation_result.append(&mut etl_result.unwrap_or_default());
+        }
     }
 
     log_info
@@ -369,6 +386,7 @@ fn process_logs(file: & mut File, config: &Config, extract_xls: Option<String>, 
 
 fn process_etl(etl: &Path, rules: &Vec<Rule>, wpa_profile: &String, extract_xls: Option<String>) -> Option<Vec<MatchResult>>
 {
+    
     let output_dir = TempDir::new("wti-logs-xls").unwrap();
     let output_path =   output_dir.path().to_str().unwrap();
 
