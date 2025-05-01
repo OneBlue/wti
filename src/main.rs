@@ -836,6 +836,9 @@ struct Args {
     #[clap(long)]
     input_xls: Option<String>,
 
+    #[clap(long)]
+    input_zip: Option<String>,
+
     #[clap(long, short)]
     debug_rules: bool,
 
@@ -1170,6 +1173,11 @@ async fn main()
     {
         let results: Vec<MatchResult> = read_logs_xls(&args.input_xls.unwrap(), &config.rules);
         Some(LogInformation{appxversion: None, evaluation_result: results, parse_error: false})
+    }
+    else if args.input_zip.is_some()
+    {
+        let mut target= OpenOptions::new().read(true).open(args.input_zip.unwrap()).unwrap();
+        Some(process_logs(&mut target, &config, args.export_xls, &mut actions))
     }
     else
     {
