@@ -21,6 +21,8 @@ reqwest = "0.11.23"
 rust-ini = "0.20.0"
 serde = { version = "1.0.204", features = ["derive"] }
 serde_yaml = "0.9.34"
+flate2 = "1.0"
+tar = "0.4"
 tempdir = "0.3.7"
 tokio = { version = "1.12.0", features = ["full"] }
 use = "0.0.1-pre.0"
