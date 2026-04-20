@@ -1,16 +1,16 @@
-use std::{collections::{HashMap, HashSet}, fs::{self, File, OpenOptions}, io::{self, Cursor, Read, Seek}, path::Path, process::Command};
+use std::{collections::{HashMap, HashSet}, fs::{self, File, OpenOptions}, io::{self, Cursor, Read, Seek}, path::{Path, PathBuf}, process::Command};
 
 use octocrab::models::issues::Issue;
 use regex::Regex;
 use colored::Colorize;
 use ini::Ini;
-use zip::{read::ZipFile, result::ZipError};
 use utf16string::WString;
 use tempdir::TempDir;
 use serde::Deserialize;
 use clap::Parser;
 use directories::BaseDirs;
 use itertools::Itertools;
+use flate2::read::GzDecoder;
 
 
 
@@ -243,7 +243,7 @@ fn extract_log_url_from_body(body: &str) -> Vec<String>
 {
     let re = Regex::new(r"https?:\/\/[^\s^\)]+").unwrap();
 
-    re.find_iter(&body).map(|e|e.as_str().to_string()).filter(|e|e.ends_with(".zip")).collect()
+    re.find_iter(&body).map(|e|e.as_str().to_string()).filter(|e|e.ends_with(".zip") || e.ends_with(".tar.gz")).collect()
 }
 
 async fn download_logs(url: &String) -> File
@@ -270,7 +270,7 @@ async fn download_logs(url: &String) -> File
     }
 }
 
-fn decode_powershell_output(file: ZipFile) -> String
+fn decode_powershell_output(file: impl Read) -> String
 {
     let mut input: Vec<u8> = file.bytes().map(|e|e.unwrap()).collect();
 
@@ -304,61 +304,60 @@ fn decode_powershell_output(file: ZipFile) -> String
     }
 }
 
-fn process_logs(file: & mut File, config: &Config, extract_xls: Option<String>, actions: &mut GithubIssueActions) -> LogInformation
+fn extract_archive(file: &mut File, filename: &str) -> (TempDir, PathBuf)
 {
-    let mut log_info = LogInformation::default();
+    let tmp_dir = TempDir::new("wti-logs").unwrap();
 
-    let mut archive = zip::ZipArchive::new(file).unwrap();
-
-    // Some zips have '\' separator and somes have '/'
-
-    let path = archive.file_names().next().unwrap().to_string();
-    let sep = if path.contains("/") 
+    let lower = filename.to_lowercase();
+    if lower.ends_with(".tar.gz") || lower.ends_with(".tgz")
     {
-        "/"
+        let decoder = GzDecoder::new(file);
+        let mut archive = tar::Archive::new(decoder);
+        archive.unpack(tmp_dir.path()).unwrap();
     }
     else
     {
-        if !path.contains("\\")
-        {
-            add_message(("Failed to parse logs. Unexpected file: ".to_owned() + &path).as_str(), &HashMap::new(), &mut actions.user_messages);
-            return log_info;
-        }
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        archive.extract(tmp_dir.path()).unwrap();
+    }
 
-        "\\"
-    };
+    let root_entry = fs::read_dir(tmp_dir.path()).unwrap().next()
+        .expect("Empty archive")
+        .unwrap();
 
-    let root = path.split(sep).next().unwrap().to_string();
-    print!("Archive root: {}\n", root);
+    let root_path = root_entry.path();
+
+    (tmp_dir, root_path)
+}
+
+fn process_logs(root_path: &Path, config: &Config, extract_xls: Option<String>, actions: &mut GithubIssueActions) -> LogInformation
+{
+    let mut log_info = LogInformation::default();
+
+    print!("Archive root: {}\n", root_path.display());
 
     {
-        let name = root.to_owned() + sep  + ".wslconfig";
-        let wslconfig = archive.by_name(&name);
-
-
-        if wslconfig.is_ok()
+        let wslconfig_path = root_path.join(".wslconfig");
+        if wslconfig_path.exists()
         {
             add_message(".wslconfig found", &HashMap::new(), &mut actions.debug_messages);
 
-            let content = decode_powershell_output(wslconfig.unwrap());
-        
+            let content = decode_powershell_output(File::open(&wslconfig_path).unwrap());
+
             process_wslconfig(content, actions);
         }
     }
 
     {
-        process_appxpackage( archive.by_name((root.to_owned() + sep + "appxpackage.txt").as_str()),  &mut log_info, actions);
+        process_appxpackage(File::open(root_path.join("appxpackage.txt")).ok(), &mut log_info, actions);
     }
 
     {
-        process_optional_components(archive.by_name((root.to_owned() + sep + "optional-components.txt").as_str()), &mut log_info, actions, &config.optional_component_rules)
+        process_optional_components(File::open(root_path.join("optional-components.txt")).ok(), &mut log_info, actions, &config.optional_component_rules)
     }
 
     {
-        let tmp_dir = TempDir::new("wti-logs").unwrap();
-        archive.extract(tmp_dir.path()).unwrap();
-        
-        let etl_path = tmp_dir.path().join(root).join("logs.etl");
+        let etl_path = root_path.join("logs.etl");
         if !etl_path.exists()
         {
             add_message("No logs.etl found in archive.", &HashMap::new(), &mut actions.debug_messages);
@@ -728,9 +727,9 @@ fn process_wslconfig(content: String, actions: &mut GithubIssueActions)
     }
 }
 
-fn process_appxpackage(file: Result<zip::read::ZipFile, ZipError>, result: &mut LogInformation, actions: &mut GithubIssueActions)
+fn process_appxpackage(file: Option<impl Read>, result: &mut LogInformation, actions: &mut GithubIssueActions)
 {
-    if file.is_err()
+    if file.is_none()
     {
         add_message("appxpackage.txt not found", &HashMap::new(), &mut actions.debug_messages);
         return;
@@ -765,9 +764,9 @@ fn process_appxpackage(file: Result<zip::read::ZipFile, ZipError>, result: &mut 
     add_message(("Detected appx version: ".to_owned() +  result.appxversion.as_ref().unwrap()).as_str(), &HashMap::new(), &mut actions.debug_messages);
 }
 
-fn process_optional_components(file: Result<zip::read::ZipFile, ZipError>, result: &mut LogInformation, actions: &mut GithubIssueActions, rules: &Vec<OptionalComponentRule>)
+fn process_optional_components(file: Option<impl Read>, result: &mut LogInformation, actions: &mut GithubIssueActions, rules: &Vec<OptionalComponentRule>)
 {
-    if file.is_err()
+    if file.is_none()
     {
         add_message("optional-components.txt not found", &HashMap::new(), &mut actions.debug_messages);
         return;
@@ -837,7 +836,7 @@ struct Args {
     input_xls: Option<String>,
 
     #[clap(long)]
-    input_zip: Option<String>,
+    input_archive: Option<String>,
 
     #[clap(long, short)]
     debug_rules: bool,
@@ -1149,7 +1148,8 @@ async fn main()
                 }
     
                 let mut logs = download_logs(&log_urls[0]).await;
-                Some(process_logs(&mut logs, &config, args.export_xls, &mut actions))
+                let (_tmp_dir, root_path) = extract_archive(&mut logs, &log_urls[0]);
+                Some(process_logs(&root_path, &config, args.export_xls, &mut actions))
             }
             else
             {
@@ -1174,10 +1174,12 @@ async fn main()
         let results: Vec<MatchResult> = read_logs_xls(&args.input_xls.unwrap(), &config.rules);
         Some(LogInformation{appxversion: None, evaluation_result: results, parse_error: false})
     }
-    else if args.input_zip.is_some()
+    else if args.input_archive.is_some()
     {
-        let mut target= OpenOptions::new().read(true).open(args.input_zip.unwrap()).unwrap();
-        Some(process_logs(&mut target, &config, args.export_xls, &mut actions))
+        let input_archive = args.input_archive.unwrap();
+        let mut target= OpenOptions::new().read(true).open(&input_archive).unwrap();
+        let (_tmp_dir, root_path) = extract_archive(&mut target, &input_archive);
+        Some(process_logs(&root_path, &config, args.export_xls, &mut actions))
     }
     else
     {
